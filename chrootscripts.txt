@@ -1,0 +1,129 @@
+# install prerequisites
+sudo apt install debootstrap qemu qemu-user-static binfmt-support dpkg-cross --no-install-recommends
+# generate minimal bootstrap rootfs
+sudo debootstrap --arch=riscv64 --foreign noble ./temp-rootfs http://ports.ubuntu.com/ubuntu-ports
+# copy network related scripts
+sudo cp ./custom/milkvscripts/* ./temp-rootfs/etc/
+sudo cp ./custom/bins/* ./temp-rootfs/usr/bin/
+sudo cp ./custom/modules/ko/cv181x_saradc.ko ./temp-rootfs/root/
+sudo cp ./custom/autostartup.sh /root/autostartup.sh
+#mount proc and sys
+sudo mount --bind /sys ./temp-rootfs/sys
+sudo mount --bind /proc ./temp-rootfs/proc
+# chroot into the rootfs we just created
+sudo chroot temp-rootfs /bin/bash
+#make network script executable
+chmod +x /etc/usb-rndis.sh /etc/uhubon.sh /etc/usb-host.sh /etc/run_usb.sh /usr/bin/duo-pinmux /usr/bin/bmp_sensor.py /root/autostartup.sh
+# run 2nd stage of deboostrap
+/debootstrap/debootstrap --second-stage
+# add package sources
+cat >/etc/apt/sources.list <<EOF
+deb http://ports.ubuntu.com/ubuntu-ports noble main restricted
+
+deb http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted
+
+deb http://ports.ubuntu.com/ubuntu-ports noble universe
+deb http://ports.ubuntu.com/ubuntu-ports noble-updates universe
+
+deb http://ports.ubuntu.com/ubuntu-ports noble multiverse
+deb http://ports.ubuntu.com/ubuntu-ports noble-updates multiverse
+
+deb http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+
+deb http://ports.ubuntu.com/ubuntu-ports noble-security main restricted
+deb http://ports.ubuntu.com/ubuntu-ports noble-security universe
+deb http://ports.ubuntu.com/ubuntu-ports noble-security multiverse
+EOF
+# update and install some packages
+apt update
+apt install --no-install-recommends -y util-linux haveged openssh-server systemd kmod initramfs-tools conntrack ebtables ethtool iproute2 iptables mount socat ifupdown iputils-ping vim neofetch sudo chrony nano htop usbutils nftables i2c-tools python3 python3-pip file screen ppp wget ntpdate strace git
+#make sure to disable systemd-resolved service as dns is managed manually, also make sure no
+# symlink to /etc/resolv.conf exists, will write this file later in this script
+systemctl disable systemd-resolved.service
+rm /etc/resolv.conf
+# optional for zram
+#apt-get install zram-config
+#systemctl enable zram-config
+# Create base config files
+mkdir -p /etc/network
+cat >>/etc/network/interfaces <<EOF
+auto lo
+iface lo inet loopback
+
+#auto eth0
+#iface eth0 inet dhcp
+EOF
+
+cat >/etc/resolv.conf <<EOF
+nameserver 1.1.1.1
+nameserver 8.8.8.8
+EOF
+
+# write text to fstab (this is with swap enabled if you want to disable it just put a # before the swap line)
+cat >/etc/fstab <<EOF
+# <file system>	<mount pt>	<type>	<options>	<dump>	<pass>
+/dev/root	/		ext2	rw,noauto	0	1
+proc		/proc		proc	defaults	0	0
+devpts		/dev/pts	devpts	defaults,gid=5,mode=620,ptmxmode=0666	0	0
+tmpfs		/dev/shm	tmpfs	mode=0777	0	0
+tmpfs		/tmp		tmpfs	mode=1777	0	0
+tmpfs		/run		tmpfs	mode=0755,nosuid,nodev,size=64M	0	0
+sysfs		/sys		sysfs	defaults	0	0
+#/dev/mmcblk0p3  none            swap    sw              0       0
+EOF
+# set hostname
+echo "mvduo-ubuntu" > /etc/hostname
+# set root passwd
+echo "root:86176631" | chpasswd
+# enable root login through ssh
+sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/g" /etc/ssh/sshd_config
+# add autostart script for rndis
+cat >>/usr/lib/systemd/system/rndis.service <<EOF
+[Unit]
+Description=RNDIS
+
+[Service]
+User=root
+WorkingDirectory=/etc/
+ExecStart=/etc/usb-rndis.sh
+# optional items below
+#Restart=always
+#RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+# enable created rndis service
+systemctl enable rndis
+# Add user autostartup script
+cat >>/etc/systemd/system/autostartup.service <<EOF
+[Unit]
+Description=Transmit JSON string using LORA containing BMP sensor readings
+
+[Service]
+ExecStart=/root/autostartup.sh
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+# enable created user autostartup service
+#systemctl enable autostartup.service
+#enable python pip
+mv /usr/lib/python3.12/EXTERNALLY-MANAGED /usr/lib/python3.12/EXTERNALLY-MANAGED.old
+#install tools for building p2plink
+#apt install build-essential  libssl-dev libmosquitto-dev uuid-dev python3-dev
+#install python requirements
+#pip3 install bmp280
+#set locales/date
+#timedatectl set-timezone Europe/Athens
+# exit chroot
+exit
+#unmount proc and sys
+sudo umount ./temp-rootfs/proc
+sudo umount ./temp-rootfs/sys
+sudo tar -cSf Ubuntu-noble-rootfs.tar -C temp-rootfs .
+gzip Ubuntu-noble-rootfs.tar
+rm -rf temp-rootfs
+
